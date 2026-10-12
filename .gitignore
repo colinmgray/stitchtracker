@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.DS_Store
+*.local
+*.progress.json
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+
+# Keep the bundled licensed pattern, but ignore any other imported PDFs.
+public/patterns/*.pdf
+!public/patterns/schema-bu5062.pdf
