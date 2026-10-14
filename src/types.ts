@@ -7,6 +7,7 @@ export type PatternSource = {
 }
 
 export type StitchOccurrence = {
+  id: string
   key: string
   x: number
   y: number

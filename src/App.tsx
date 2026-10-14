@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { PatternViewer } from './components/PatternViewer'
 import { SymbolPanel } from './components/SymbolPanel'
+import { TransferDialog } from './components/TransferDialog'
 import {
   extractPattern,
   buildSymbolAssets,
@@ -9,8 +10,10 @@ import {
   loadUploadedPattern,
 } from './pdf/pattern'
 import type { PatternData, PatternSource } from './types'
+import { loadProgress, saveProgress } from './storage/progress'
 
 type LoadState = 'loading' | 'ready' | 'error'
+type SaveState = 'saved' | 'saving' | 'error'
 
 const EMPTY_PATTERN: PatternData = { occurrences: [], symbols: [] }
 
@@ -21,10 +24,18 @@ export default function App() {
   const [loadState, setLoadState] = useState<LoadState>('loading')
   const [error, setError] = useState('')
   const [visibleSymbols, setVisibleSymbols] = useState<Set<string>>(new Set())
+  const [activeSymbolKey, setActiveSymbolKey] = useState<string | null>(null)
+  const [completedCells, setCompletedCells] = useState<Set<string>>(new Set())
+  const [progressStorageKey, setProgressStorageKey] = useState('')
+  const [saveState, setSaveState] = useState<SaveState>('saved')
+  const [paintEnabled, setPaintEnabled] = useState(true)
+  const [showCompleted, setShowCompleted] = useState(true)
   const [symbolImages, setSymbolImages] = useState<Map<string, string>>(new Map())
   const [symbolColors, setSymbolColors] = useState<Map<string, string>>(new Map())
+  const [symbolsInView, setSymbolsInView] = useState<Set<string>>(new Set())
   const [pageNumber, setPageNumber] = useState(1)
   const [zoom, setZoom] = useState(1.25)
+  const [transferOpen, setTransferOpen] = useState(false)
 
   async function ingest(nextSource: Promise<PatternSource>) {
     setLoadState('loading')
@@ -33,11 +44,26 @@ export default function App() {
       const loaded = await nextSource
       const extracted = await extractPattern(loaded.document)
       const assets = await buildSymbolAssets(loaded.document, extracted)
+      const fingerprint = loaded.document.fingerprints?.[0] ?? loaded.name
+      const storageKey = `stitchtracker:progress:${fingerprint}`
+      const validIds = new Set(extracted.occurrences.map((item) => item.id))
+      let savedCells = new Set<string>()
+      const saved = await loadProgress(storageKey)
+      savedCells = new Set(
+        (saved?.completed ?? [])
+          .map((id) => id.split(':').slice(-2).join(':'))
+          .filter((id) => validIds.has(id)),
+      )
       setSource(loaded)
       setPattern(extracted)
       setVisibleSymbols(new Set())
+      setActiveSymbolKey(null)
+      setCompletedCells(savedCells)
+      setProgressStorageKey(storageKey)
+      setSaveState('saved')
       setSymbolImages(assets.fallbackImages)
       setSymbolColors(assets.colors)
+      setSymbolsInView(new Set(extracted.symbols.map((symbol) => symbol.key)))
       setPageNumber(1)
       setLoadState('ready')
     } catch (reason) {
@@ -51,6 +77,21 @@ export default function App() {
     void ingest(loadBundledPattern())
   }, [])
 
+  useEffect(() => {
+    if (!progressStorageKey || loadState !== 'ready') return
+    setSaveState('saving')
+    const timer = window.setTimeout(() => {
+      void saveProgress(progressStorageKey, {
+          version: 1,
+          completed: Array.from(completedCells),
+          updatedAt: new Date().toISOString(),
+        })
+        .then(() => setSaveState('saved'))
+        .catch(() => setSaveState('error'))
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [completedCells, loadState, progressStorageKey])
+
   async function handleUpload(file: File | undefined) {
     if (!file) return
     await ingest(loadUploadedPattern(file))
@@ -60,24 +101,61 @@ export default function App() {
   function toggleSymbol(key: string) {
     setVisibleSymbols((current) => {
       const next = new Set(current)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
+      if (!next.has(key)) {
+        next.add(key)
+        setActiveSymbolKey(key)
+      } else if (activeSymbolKey === key) {
+        next.delete(key)
+        setActiveSymbolKey(null)
+      } else {
+        setActiveSymbolKey(key)
+      }
       return next
     })
   }
 
-  const progress = useMemo(() => {
-    if (!pattern.occurrences.length) return 0
-    return Math.round(
-      (Array.from(visibleSymbols).reduce(
-        (total, key) =>
-          total + pattern.occurrences.filter((item) => item.key === key).length,
-        0,
-      ) /
-        pattern.occurrences.length) *
-        100,
-    )
-  }, [pattern.occurrences, visibleSymbols])
+  const completedBySymbol = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const occurrence of pattern.occurrences) {
+      if (completedCells.has(occurrence.id)) {
+        counts.set(occurrence.key, (counts.get(occurrence.key) ?? 0) + 1)
+      }
+    }
+    return counts
+  }, [completedCells, pattern.occurrences])
+
+  const activeSymbol = pattern.symbols.find((symbol) => symbol.key === activeSymbolKey)
+  const paletteSymbols = pattern.symbols.filter((symbol) => symbolsInView.has(symbol.key))
+  const selectedStitchCount = pattern.symbols
+    .filter((symbol) => visibleSymbols.has(symbol.key))
+    .reduce((total, symbol) => total + symbol.count, 0)
+  const totalProgress = pattern.occurrences.length
+    ? Math.round((completedCells.size / pattern.occurrences.length) * 100)
+    : 0
+
+  function paintCell(id: string, completed: boolean) {
+    setCompletedCells((current) => {
+      if (current.has(id) === completed) return current
+      const next = new Set(current)
+      if (completed) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+
+  function clearSelection() {
+    setVisibleSymbols(new Set())
+    setActiveSymbolKey(null)
+  }
+
+  const updateSymbolsInView = useCallback((next: Set<string>) => {
+    setSymbolsInView((current) => {
+      if (current.size === next.size && Array.from(next).every((key) => current.has(key))) {
+        return current
+      }
+      return next
+    })
+  }, [])
 
   return (
     <div className="app-shell">
@@ -104,6 +182,13 @@ export default function App() {
             hidden
             onChange={(event) => void handleUpload(event.target.files?.[0])}
           />
+          <button
+            className="secondary-button transfer-button"
+            type="button"
+            onClick={() => setTransferOpen(true)}
+          >
+            Transfer progress
+          </button>
           <button
             className="secondary-button"
             type="button"
@@ -137,13 +222,19 @@ export default function App() {
       {loadState === 'ready' && source && (
         <main className="workspace">
           <SymbolPanel
-            symbols={pattern.symbols}
+            symbols={paletteSymbols}
+            totalSymbolCount={pattern.symbols.length}
             visibleSymbols={visibleSymbols}
             symbolImages={symbolImages}
             symbolColors={symbolColors}
-            useEmbeddedWebFont={source.bundled}
+            activeSymbolKey={activeSymbolKey}
+            completedBySymbol={completedBySymbol}
+            totalCompleted={completedCells.size}
+            totalStitches={pattern.occurrences.length}
+            selectedSymbolCount={visibleSymbols.size}
+            selectedStitchCount={selectedStitchCount}
             onToggle={toggleSymbol}
-            onClear={() => setVisibleSymbols(new Set())}
+            onClear={clearSelection}
           />
 
           <section className="viewer-column">
@@ -153,18 +244,44 @@ export default function App() {
                 <h1>{source.name}</h1>
                 <span>
                   {pattern.occurrences.length.toLocaleString()} stitches ·{' '}
-                  {pattern.symbols.length} symbols
+                  {pattern.symbols.length} colors
                 </span>
               </div>
 
               <div className="toolbar-controls">
+                <div className="segmented-control" aria-label="Interaction mode">
+                  <button
+                    type="button"
+                    className={paintEnabled ? 'active' : ''}
+                    onClick={() => setPaintEnabled(true)}
+                  >
+                    Paint
+                  </button>
+                  <button
+                    type="button"
+                    className={!paintEnabled ? 'active' : ''}
+                    onClick={() => setPaintEnabled(false)}
+                  >
+                    Navigate
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  className={`completed-toggle${showCompleted ? ' active' : ''}`}
+                  aria-pressed={showCompleted}
+                  onClick={() => setShowCompleted((value) => !value)}
+                >
+                  Completed
+                </button>
+
                 <div className="segmented-control" aria-label="Pattern view">
                   <button
                     type="button"
                     className={pageNumber === 1 ? 'active' : ''}
                     onClick={() => setPageNumber(1)}
                   >
-                    Symbols
+                    Pattern
                   </button>
                   <button
                     type="button"
@@ -172,7 +289,7 @@ export default function App() {
                     onClick={() => setPageNumber(2)}
                     disabled={source.document.numPages < 2}
                   >
-                    Color
+                    Color chart
                   </button>
                 </div>
 
@@ -188,7 +305,7 @@ export default function App() {
                   <button
                     type="button"
                     aria-label="Zoom in"
-                    onClick={() => setZoom((value) => Math.min(3, value + 0.25))}
+                    onClick={() => setZoom((value) => Math.min(5, value + 0.25))}
                   >
                     +
                   </button>
@@ -203,18 +320,53 @@ export default function App() {
                 occurrences={pattern.occurrences}
                 visibleSymbols={visibleSymbols}
                 symbolColors={symbolColors}
+                completedCells={completedCells}
+                activeSymbolKey={activeSymbolKey}
+                showCompleted={showCompleted}
+                paintEnabled={paintEnabled}
                 zoom={zoom}
+                onPaintCell={paintCell}
+                onZoomChange={setZoom}
+                onVisibleSymbolsChange={updateSymbolsInView}
               />
             </div>
 
             <footer className="viewer-footer">
               <span>
-                <kbd>Click</kbd> symbols in the left panel to highlight them
+                {activeSymbol ? (
+                  <>
+                    <kbd>Paint</kbd> {activeSymbol.label}:{' '}
+                    {(completedBySymbol.get(activeSymbol.key) ?? 0).toLocaleString()} of{' '}
+                    {activeSymbol.count.toLocaleString()} complete
+                  </>
+                ) : (
+                  <>Choose a color on the left, then paint completed stitches</>
+                )}
               </span>
-              <span>{progress}% of chart currently visible</span>
+              <span>
+                {completedCells.size.toLocaleString()} of {pattern.occurrences.length.toLocaleString()}{' '}
+                complete · {totalProgress}% ·{' '}
+                {saveState === 'saving'
+                  ? 'Saving…'
+                  : saveState === 'error'
+                    ? 'Could not save'
+                    : 'Saved locally'}
+              </span>
             </footer>
           </section>
         </main>
+      )}
+
+      {transferOpen && loadState === 'ready' && source && (
+        <TransferDialog
+          patternName={source.name}
+          patternKey={progressStorageKey}
+          completedCells={completedCells}
+          validCellIds={new Set(pattern.occurrences.map((occurrence) => occurrence.id))}
+          totalStitches={pattern.occurrences.length}
+          onImport={setCompletedCells}
+          onClose={() => setTransferOpen(false)}
+        />
       )}
     </div>
   )
@@ -231,8 +383,8 @@ function LoadingScreen() {
           <i />
         </span>
         <p className="eyebrow">Preparing your chart</p>
-        <h1>Reading stitch symbols…</h1>
-        <p>The PDF stays in your browser while we map each symbol to its position.</p>
+        <h1>Reading stitch colors…</h1>
+        <p>The PDF stays in your browser while we map each color to its chart positions.</p>
       </div>
     </main>
   )

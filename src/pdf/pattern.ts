@@ -48,9 +48,11 @@ export async function extractPattern(document: PDFDocumentProxy): Promise<Patter
   const text = await page.getTextContent({ disableNormalization: true })
   const occurrences: StitchOccurrence[] = text.items.flatMap((item) => {
     if (!isTextItem(item) || !isStitchGlyph(item)) return []
+    const key = `${item.fontName}:${item.str.codePointAt(0)}`
     return [
       {
-        key: `${item.fontName}:${item.str.codePointAt(0)}`,
+        id: `${Math.round(item.transform[4] * 1000)}:${Math.round(item.transform[5] * 1000)}`,
+        key,
         x: item.transform[4],
         y: item.transform[5],
         width: item.width,
@@ -81,7 +83,7 @@ export async function extractPattern(document: PDFDocumentProxy): Promise<Patter
   const symbols: StitchSymbol[] = Array.from(grouped.entries())
     .map(([key, values], index) => ({
       key,
-      label: `Symbol ${index + 1}`,
+      label: `Color ${index + 1}`,
       count: values.length,
       sample: values[0],
       webGlyph:
@@ -90,7 +92,7 @@ export async function extractPattern(document: PDFDocumentProxy): Promise<Patter
           : null,
     }))
     .sort((a, b) => b.count - a.count)
-    .map((symbol, index) => ({ ...symbol, label: `Symbol ${index + 1}` }))
+    .map((symbol, index) => ({ ...symbol, label: `Color ${index + 1}` }))
 
   return { occurrences, symbols }
 }
@@ -129,10 +131,9 @@ function cellRect(
   )
   const cellSize = 4.16 * viewport.scale
   const glyphWidth = occurrence.width * viewport.scale
-  const glyphHeight = occurrence.height * viewport.scale
   return {
     left: originX - Math.max(0, (cellSize - glyphWidth) / 2),
-    top: baselineY - glyphHeight - Math.max(0, (cellSize - glyphHeight) / 2),
+    top: baselineY - cellSize / 2,
     size: cellSize,
   }
 }
@@ -146,7 +147,7 @@ async function extractFallbackGlyphs(
 
   for (const symbol of symbols) {
     const rect = cellRect(viewport, symbol.sample)
-    const inset = rect.size * 0.1
+    const inset = rect.size * 0.12
     const preview = window.document.createElement('canvas')
     preview.width = 64
     preview.height = 64
@@ -167,11 +168,17 @@ async function extractFallbackGlyphs(
 
     const pixels = context.getImageData(0, 0, 64, 64)
     for (let i = 0; i < pixels.data.length; i += 4) {
+      const pixel = i / 4
+      const x = pixel % 64
+      const y = Math.floor(pixel / 64)
       const red = pixels.data[i]
       const green = pixels.data[i + 1]
       const blue = pixels.data[i + 2]
       const luminance = red * 0.299 + green * 0.587 + blue * 0.114
-      const alpha = Math.max(0, Math.min(255, (225 - luminance) * 5))
+      const insideGlyphArea = x >= 9 && x <= 54 && y >= 9 && y <= 54
+      const alpha = insideGlyphArea
+        ? Math.max(0, Math.min(255, (225 - luminance) * 5))
+        : 0
       pixels.data[i] = 20
       pixels.data[i + 1] = 39
       pixels.data[i + 2] = 36
