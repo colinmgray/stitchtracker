@@ -4,9 +4,11 @@ type TransferDialogProps = {
   patternName: string
   patternKey: string
   completedCells: Set<string>
+  symbolColors: Map<string, string>
   validCellIds: Set<string>
+  validSymbolKeys: Set<string>
   totalStitches: number
-  onImport: (completed: Set<string>) => void
+  onImport: (completed: Set<string>, symbolColors: Map<string, string>) => void
   onClose: () => void
 }
 
@@ -17,6 +19,7 @@ type TransferPayload = {
   patternName: string
   totalStitches: number
   completed: string[]
+  symbolColors?: Record<string, string>
   exportedAt: string
 }
 
@@ -35,7 +38,13 @@ function isTransferPayload(value: unknown): value is TransferPayload {
     payload.version === 1 &&
     typeof payload.patternKey === 'string' &&
     Array.isArray(payload.completed) &&
-    payload.completed.every((id) => typeof id === 'string')
+    payload.completed.every((id) => typeof id === 'string') &&
+    (payload.symbolColors === undefined || (
+      typeof payload.symbolColors === 'object' &&
+      payload.symbolColors !== null &&
+      !Array.isArray(payload.symbolColors) &&
+      Object.values(payload.symbolColors).every((color) => typeof color === 'string')
+    ))
   )
 }
 
@@ -43,7 +52,9 @@ export function TransferDialog({
   patternName,
   patternKey,
   completedCells,
+  symbolColors,
   validCellIds,
+  validSymbolKeys,
   totalStitches,
   onImport,
   onClose,
@@ -68,6 +79,7 @@ export function TransferDialog({
       patternName,
       totalStitches,
       completed: Array.from(completedCells),
+      symbolColors: Object.fromEntries(symbolColors),
       exportedAt: new Date().toISOString(),
     }
     return new File([JSON.stringify(payload, null, 2)], `${safeFileName(patternName)}.stitchprogress.json`, {
@@ -122,7 +134,13 @@ export function TransferDialog({
           .map((id) => id.split(':').slice(-2).join(':'))
           .filter((id) => validCellIds.has(id)),
       )
-      onImport(imported)
+      const importedColors = new Map(
+        Object.entries(payload.symbolColors ?? {})
+          .filter(([key, color]) => (
+            validSymbolKeys.has(key) && /^#[0-9a-f]{6}$/i.test(color)
+          )),
+      )
+      onImport(imported, importedColors)
       setMessage(`Imported ${imported.size.toLocaleString()} completed stitches.`)
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : 'Progress could not be imported.')

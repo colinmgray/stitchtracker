@@ -1,6 +1,7 @@
 export type SavedProgress = {
   version: 1
   completed: string[]
+  symbolColors?: Record<string, string>
   updatedAt: string
 }
 

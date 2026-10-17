@@ -658,6 +658,11 @@ button {
   place-items: start center;
 }
 
+.page-surface {
+  position: relative;
+  flex: none;
+}
+
 .canvas-stack {
   position: relative;
   width: max-content;
@@ -667,6 +672,10 @@ button {
   box-shadow:
     0 18px 44px rgba(30, 54, 49, 0.14),
     0 2px 5px rgba(30, 54, 49, 0.12);
+}
+
+.canvas-stack.tiled {
+  position: absolute;
 }
 
 .canvas-stack canvas {

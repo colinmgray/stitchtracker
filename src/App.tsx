@@ -33,6 +33,7 @@ export default function App() {
   const [saveState, setSaveState] = useState<SaveState>('saved')
   const [paintEnabled, setPaintEnabled] = useState(true)
   const [showCompleted, setShowCompleted] = useState(true)
+  const [lowPerformance, setLowPerformance] = useState(false)
   const [symbolImages, setSymbolImages] = useState<Map<string, string>>(new Map())
   const [symbolColors, setSymbolColors] = useState<Map<string, string>>(new Map())
   const [symbolsInView, setSymbolsInView] = useState<Set<string>>(new Set())
@@ -49,12 +50,17 @@ export default function App() {
       const fingerprint = loaded.document.fingerprints?.[0] ?? loaded.name
       const storageKey = `stitchtracker:progress:${fingerprint}`
       const validIds = new Set(extracted.occurrences.map((item) => item.id))
+      const validSymbolKeys = new Set(extracted.symbols.map((symbol) => symbol.key))
       let savedCells = new Set<string>()
       const saved = await loadProgress(storageKey)
       savedCells = new Set(
         (saved?.completed ?? [])
           .map((id) => id.split(':').slice(-2).join(':'))
           .filter((id) => validIds.has(id)),
+      )
+      const savedColors = new Map(
+        Object.entries(saved?.symbolColors ?? {})
+          .filter(([key, color]) => validSymbolKeys.has(key) && /^#[0-9a-f]{6}$/i.test(color)),
       )
       setSource(loaded)
       setPattern(extracted)
@@ -64,9 +70,9 @@ export default function App() {
       setProgressStorageKey(storageKey)
       setSaveState('saved')
       symbolImagesBuiltRef.current = false
-      symbolColorsBuiltRef.current = false
+      symbolColorsBuiltRef.current = savedColors.size === extracted.symbols.length
       setSymbolImages(new Map())
-      setSymbolColors(new Map())
+      setSymbolColors(savedColors)
       setSymbolsInView(new Set(extracted.symbols.map((symbol) => symbol.key)))
       setPageNumber(1)
       setLoadState('ready')
@@ -88,13 +94,14 @@ export default function App() {
       void saveProgress(progressStorageKey, {
           version: 1,
           completed: Array.from(completedCells),
+          symbolColors: Object.fromEntries(symbolColors),
           updatedAt: new Date().toISOString(),
         })
         .then(() => setSaveState('saved'))
         .catch(() => setSaveState('error'))
     }, 250)
     return () => window.clearTimeout(timer)
-  }, [completedCells, loadState, progressStorageKey])
+  }, [completedCells, loadState, progressStorageKey, symbolColors])
 
   async function handleUpload(file: File | undefined) {
     if (!file) return
@@ -296,6 +303,16 @@ export default function App() {
                   Completed
                 </button>
 
+                <button
+                  type="button"
+                  className={`completed-toggle${lowPerformance ? ' active' : ''}`}
+                  aria-pressed={lowPerformance}
+                  onClick={() => setLowPerformance((value) => !value)}
+                  title="Render only the visible portion of the pattern"
+                >
+                  Low performance
+                </button>
+
                 <div className="segmented-control" aria-label="Pattern view">
                   <button
                     type="button"
@@ -345,6 +362,7 @@ export default function App() {
                 activeSymbolKey={activeSymbolKey}
                 showCompleted={showCompleted}
                 paintEnabled={paintEnabled}
+                lowPerformance={lowPerformance}
                 zoom={zoom}
                 onPaintCell={paintCell}
                 onZoomChange={setZoom}
@@ -384,9 +402,17 @@ export default function App() {
           patternName={source.name}
           patternKey={progressStorageKey}
           completedCells={completedCells}
+          symbolColors={symbolColors}
           validCellIds={new Set(pattern.occurrences.map((occurrence) => occurrence.id))}
+          validSymbolKeys={new Set(pattern.symbols.map((symbol) => symbol.key))}
           totalStitches={pattern.occurrences.length}
-          onImport={setCompletedCells}
+          onImport={(importedCells, importedColors) => {
+            setCompletedCells(importedCells)
+            if (importedColors.size) {
+              setSymbolColors(importedColors)
+              symbolColorsBuiltRef.current = importedColors.size === pattern.symbols.length
+            }
+          }}
           onClose={() => setTransferOpen(false)}
         />
       )}
