@@ -54,7 +54,7 @@ function localProgressStore() {
 
 export default defineConfig({
   plugins: [react(), localProgressStore()],
-  base: './',
+  base: '/stitchtracker/',
   server: {
     host: '127.0.0.1',
     port: 5173,
