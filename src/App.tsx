@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { PDFDocumentProxy } from 'pdfjs-dist'
+import type { PDFDocumentProxy, PageViewport } from 'pdfjs-dist'
 import { PatternViewer } from './components/PatternViewer'
 import { SymbolPanel } from './components/SymbolPanel'
 import { TransferDialog } from './components/TransferDialog'
 import {
   extractPattern,
-  buildSymbolAssets,
+  extractFallbackGlyphs,
+  extractSymbolColors,
   loadBundledPattern,
   loadUploadedPattern,
 } from './pdf/pattern'
@@ -19,6 +20,8 @@ const EMPTY_PATTERN: PatternData = { occurrences: [], symbols: [] }
 
 export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const symbolImagesBuiltRef = useRef(false)
+  const symbolColorsBuiltRef = useRef(false)
   const [source, setSource] = useState<PatternSource | null>(null)
   const [pattern, setPattern] = useState<PatternData>(EMPTY_PATTERN)
   const [loadState, setLoadState] = useState<LoadState>('loading')
@@ -43,7 +46,6 @@ export default function App() {
     try {
       const loaded = await nextSource
       const extracted = await extractPattern(loaded.document)
-      const assets = await buildSymbolAssets(loaded.document, extracted)
       const fingerprint = loaded.document.fingerprints?.[0] ?? loaded.name
       const storageKey = `stitchtracker:progress:${fingerprint}`
       const validIds = new Set(extracted.occurrences.map((item) => item.id))
@@ -61,8 +63,10 @@ export default function App() {
       setCompletedCells(savedCells)
       setProgressStorageKey(storageKey)
       setSaveState('saved')
-      setSymbolImages(assets.fallbackImages)
-      setSymbolColors(assets.colors)
+      symbolImagesBuiltRef.current = false
+      symbolColorsBuiltRef.current = false
+      setSymbolImages(new Map())
+      setSymbolColors(new Map())
       setSymbolsInView(new Set(extracted.symbols.map((symbol) => symbol.key)))
       setPageNumber(1)
       setLoadState('ready')
@@ -156,6 +160,23 @@ export default function App() {
       return next
     })
   }, [])
+
+  const handlePageRendered = useCallback((
+    renderedPageNumber: number,
+    canvas: HTMLCanvasElement,
+    viewport: PageViewport,
+  ) => {
+    if (renderedPageNumber === 1 && !symbolImagesBuiltRef.current) {
+      symbolImagesBuiltRef.current = true
+      setSymbolImages(extractFallbackGlyphs(canvas, viewport, pattern.symbols))
+    }
+
+    const isColorSource = renderedPageNumber === 2 || source?.document.numPages === 1
+    if (isColorSource && !symbolColorsBuiltRef.current) {
+      symbolColorsBuiltRef.current = true
+      setSymbolColors(extractSymbolColors(canvas, viewport, pattern))
+    }
+  }, [pattern, source])
 
   return (
     <div className="app-shell">
@@ -328,6 +349,7 @@ export default function App() {
                 onPaintCell={paintCell}
                 onZoomChange={setZoom}
                 onVisibleSymbolsChange={updateSymbolsInView}
+                onPageRendered={handlePageRendered}
               />
             </div>
 

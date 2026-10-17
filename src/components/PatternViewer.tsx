@@ -21,6 +21,11 @@ type PatternViewerProps = {
   onPaintCell: (id: string, completed: boolean) => void
   onZoomChange: (zoom: number) => void
   onVisibleSymbolsChange: (symbols: Set<string>) => void
+  onPageRendered: (
+    pageNumber: number,
+    canvas: HTMLCanvasElement,
+    viewport: PageViewport,
+  ) => void
 }
 
 type Point = { x: number; y: number }
@@ -38,6 +43,13 @@ type PinchState = {
 const CELL_SIZE = 4.16
 const MIN_ZOOM = 0.75
 const MAX_ZOOM = 5
+const MAX_CANVAS_PIXELS = 8_000_000
+
+function outputScaleFor(viewport: PageViewport) {
+  const deviceScale = window.devicePixelRatio || 1
+  const pixelLimitScale = Math.sqrt(MAX_CANVAS_PIXELS / (viewport.width * viewport.height))
+  return Math.min(deviceScale, pixelLimitScale)
+}
 
 function distanceToSegment(point: Point, start: Point, end: Point) {
   const dx = end.x - start.x
@@ -75,24 +87,28 @@ export function PatternViewer({
   onPaintCell,
   onZoomChange,
   onVisibleSymbolsChange,
+  onPageRendered,
 }: PatternViewerProps) {
   const baseCanvasRef = useRef<HTMLCanvasElement>(null)
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null)
   const touchesRef = useRef(new Map<number, Point>())
   const pinchRef = useRef<PinchState | null>(null)
+  const pendingPinchZoomRef = useRef<number | null>(null)
   const paintingRef = useRef(false)
   const paintValueRef = useRef(true)
   const lastPaintPointRef = useRef<Point | null>(null)
   const paintedCellsRef = useRef(new Set<string>())
   const zoomRef = useRef(zoom)
   const onZoomChangeRef = useRef(onZoomChange)
+  const onPageRenderedRef = useRef(onPageRendered)
   const [viewport, setViewport] = useState<PageViewport | null>(null)
   const [rendering, setRendering] = useState(true)
 
   useEffect(() => {
     zoomRef.current = zoom
     onZoomChangeRef.current = onZoomChange
-  }, [onZoomChange, zoom])
+    onPageRenderedRef.current = onPageRendered
+  }, [onPageRendered, onZoomChange, zoom])
 
   useEffect(() => {
     let cancelled = false
@@ -109,7 +125,7 @@ export function PatternViewer({
       const context = canvas.getContext('2d', { alpha: false })
       if (!context) return
 
-      const outputScale = window.devicePixelRatio || 1
+      const outputScale = outputScaleFor(nextViewport)
       canvas.width = Math.floor(nextViewport.width * outputScale)
       canvas.height = Math.floor(nextViewport.height * outputScale)
       canvas.style.width = `${nextViewport.width}px`
@@ -131,6 +147,7 @@ export function PatternViewer({
         throw reason
       }
       if (!cancelled) {
+        onPageRenderedRef.current(pageNumber, canvas, nextViewport)
         setViewport(nextViewport)
         setRendering(false)
       }
@@ -149,7 +166,9 @@ export function PatternViewer({
     if (!canvas || !frame) return
     type BrowserGestureEvent = Event & { scale?: number; clientX?: number; clientY?: number }
     let gestureStart: (PinchState & { clientX: number; clientY: number }) | null = null
-    let lastWheelUpdate = 0
+    let gestureZoom: number | null = null
+    let wheelZoom: number | null = null
+    let wheelTimer = 0
 
     const framePoint = (clientX?: number, clientY?: number) => {
       const bounds = frame.getBoundingClientRect()
@@ -174,6 +193,7 @@ export function PatternViewer({
         clientX: point.x,
         clientY: point.y,
       }
+      gestureZoom = zoomRef.current
     }
 
     const changeNativeGesture = (event: BrowserGestureEvent) => {
@@ -184,44 +204,39 @@ export function PatternViewer({
         MIN_ZOOM,
         Math.min(MAX_ZOOM, Math.round((gestureStart.zoom * (event.scale ?? 1)) * 4) / 4),
       )
-      const scale = nextZoom / gestureStart.zoom
-      const anchorX = gestureStart.scrollLeft + gestureStart.clientX - gestureStart.frameLeft
-      const anchorY = gestureStart.scrollTop + gestureStart.clientY - gestureStart.frameTop
-      frame.scrollLeft = anchorX * scale - (gestureStart.clientX - gestureStart.frameLeft)
-      frame.scrollTop = anchorY * scale - (gestureStart.clientY - gestureStart.frameTop)
-      if (nextZoom !== zoomRef.current) {
-        zoomRef.current = nextZoom
-        onZoomChangeRef.current(nextZoom)
-      }
+      gestureZoom = nextZoom
     }
 
     const handleTrackpadPinch = (event: WheelEvent) => {
       if (!event.ctrlKey) return
       event.preventDefault()
-      const now = performance.now()
-      if (now - lastWheelUpdate < 55) return
-      lastWheelUpdate = now
-      const previousZoom = zoomRef.current
+      const previousZoom = wheelZoom ?? zoomRef.current
       const nextZoom = Math.max(
         MIN_ZOOM,
         Math.min(MAX_ZOOM, previousZoom + (event.deltaY < 0 ? 0.25 : -0.25)),
       )
       if (nextZoom === previousZoom) return
-      const point = framePoint(event.clientX, event.clientY)
-      const scale = nextZoom / previousZoom
-      const anchorX = frame.scrollLeft + point.x - point.bounds.left
-      const anchorY = frame.scrollTop + point.y - point.bounds.top
-      frame.scrollLeft = anchorX * scale - (point.x - point.bounds.left)
-      frame.scrollTop = anchorY * scale - (point.y - point.bounds.top)
-      zoomRef.current = nextZoom
-      onZoomChangeRef.current(nextZoom)
+      wheelZoom = nextZoom
+      window.clearTimeout(wheelTimer)
+      wheelTimer = window.setTimeout(() => {
+        if (wheelZoom !== null && wheelZoom !== zoomRef.current) {
+          zoomRef.current = wheelZoom
+          onZoomChangeRef.current(wheelZoom)
+        }
+        wheelZoom = null
+      }, 140)
     }
 
     const preventMultiTouch = (event: TouchEvent) => {
       if (event.touches.length > 1) event.preventDefault()
     }
     const endNativeGesture = () => {
+      if (gestureZoom !== null && gestureZoom !== zoomRef.current) {
+        zoomRef.current = gestureZoom
+        onZoomChangeRef.current(gestureZoom)
+      }
       gestureStart = null
+      gestureZoom = null
     }
     frame.addEventListener('touchstart', preventMultiTouch, { passive: false })
     frame.addEventListener('touchmove', preventMultiTouch, { passive: false })
@@ -236,14 +251,15 @@ export function PatternViewer({
       frame.removeEventListener('gesturechange', changeNativeGesture)
       frame.removeEventListener('gestureend', endNativeGesture)
       frame.removeEventListener('wheel', handleTrackpadPinch)
+      window.clearTimeout(wheelTimer)
     }
   }, [])
 
   function getCellRect(occurrence: StitchOccurrence) {
     if (!viewport) return null
     const [originX, baselineY] = viewport.convertToViewportPoint(occurrence.x, occurrence.y)
-    const cellSize = CELL_SIZE * zoom
-    const glyphWidth = occurrence.width * zoom
+    const cellSize = CELL_SIZE * viewport.scale
+    const glyphWidth = occurrence.width * viewport.scale
     return {
       left: originX - Math.max(0, (cellSize - glyphWidth) / 2),
       top: baselineY - cellSize / 2,
@@ -255,10 +271,10 @@ export function PatternViewer({
     const canvas = overlayCanvasRef.current
     const frame = canvas?.closest('.viewer-frame') as HTMLElement | null
     if (!canvas || !frame || !viewport) return
-    let animationFrame = 0
+    let reportTimer = 0
 
     const reportVisibleSymbols = () => {
-      animationFrame = 0
+      reportTimer = 0
       if (pageNumber !== 1) {
         onVisibleSymbolsChange(new Set(occurrences.map((occurrence) => occurrence.key)))
         return
@@ -285,7 +301,8 @@ export function PatternViewer({
     }
 
     const scheduleReport = () => {
-      if (!animationFrame) animationFrame = window.requestAnimationFrame(reportVisibleSymbols)
+      window.clearTimeout(reportTimer)
+      reportTimer = window.setTimeout(reportVisibleSymbols, 100)
     }
     const resizeObserver = new ResizeObserver(scheduleReport)
     resizeObserver.observe(frame)
@@ -294,15 +311,15 @@ export function PatternViewer({
     return () => {
       frame.removeEventListener('scroll', scheduleReport)
       resizeObserver.disconnect()
-      if (animationFrame) window.cancelAnimationFrame(animationFrame)
+      window.clearTimeout(reportTimer)
     }
-  }, [occurrences, onVisibleSymbolsChange, pageNumber, viewport, zoom])
+  }, [occurrences, onVisibleSymbolsChange, pageNumber, viewport])
 
   useEffect(() => {
     const canvas = overlayCanvasRef.current
     if (!canvas || !viewport) return
 
-    const outputScale = window.devicePixelRatio || 1
+    const outputScale = outputScaleFor(viewport)
     canvas.width = Math.floor(viewport.width * outputScale)
     canvas.height = Math.floor(viewport.height * outputScale)
     canvas.style.width = `${viewport.width}px`
@@ -322,7 +339,7 @@ export function PatternViewer({
         context.fillStyle = `${color}a8`
         context.fillRect(rect.left, rect.top, rect.size, rect.size)
         context.strokeStyle = `${color}dd`
-        context.lineWidth = Math.max(0.5, zoom * 0.35)
+        context.lineWidth = Math.max(0.5, viewport.scale * 0.35)
         context.strokeRect(rect.left + 0.25, rect.top + 0.25, rect.size - 0.5, rect.size - 0.5)
       }
 
@@ -342,7 +359,7 @@ export function PatternViewer({
         }
       }
     }
-  }, [completedCells, occurrences, pageNumber, showCompleted, symbolColors, viewport, visibleSymbols, zoom])
+  }, [completedCells, occurrences, pageNumber, showCompleted, symbolColors, viewport, visibleSymbols])
 
   function canvasPoint(event: ReactPointerEvent<HTMLCanvasElement>): Point {
     const bounds = event.currentTarget.getBoundingClientRect()
@@ -351,7 +368,7 @@ export function PatternViewer({
 
   function paintBetween(start: Point, end: Point) {
     if (!viewport || !activeSymbolKey || pageNumber !== 1) return
-    const threshold = (CELL_SIZE * zoom) / 2
+    const threshold = (CELL_SIZE * viewport.scale) / 2
     for (const occurrence of occurrences) {
       if (occurrence.key !== activeSymbolKey || paintedCellsRef.current.has(occurrence.id)) continue
       const rect = getCellRect(occurrence)
@@ -378,13 +395,14 @@ export function PatternViewer({
     lastPaintPointRef.current = null
     pinchRef.current = {
       distance: Math.max(pointerDistance(points), 1),
-      zoom,
+      zoom: zoomRef.current,
       midpoint: midpoint(points),
       scrollLeft: frame.scrollLeft,
       scrollTop: frame.scrollTop,
       frameLeft: frameBounds.left,
       frameTop: frameBounds.top,
     }
+    pendingPinchZoomRef.current = zoomRef.current
   }
 
   function handlePointerDown(event: ReactPointerEvent<HTMLCanvasElement>) {
@@ -433,21 +451,12 @@ export function PatternViewer({
         )
         const frame = event.currentTarget.closest('.viewer-frame') as HTMLElement | null
         if (frame) {
-          const scale = nextZoom / pinchRef.current.zoom
-          const anchorX =
-            pinchRef.current.scrollLeft +
-            pinchRef.current.midpoint.x -
-            pinchRef.current.frameLeft
-          const anchorY =
-            pinchRef.current.scrollTop +
-            pinchRef.current.midpoint.y -
-            pinchRef.current.frameTop
           frame.scrollLeft =
-            anchorX * scale - (currentMidpoint.x - pinchRef.current.frameLeft)
+            pinchRef.current.scrollLeft - (currentMidpoint.x - pinchRef.current.midpoint.x)
           frame.scrollTop =
-            anchorY * scale - (currentMidpoint.y - pinchRef.current.frameTop)
+            pinchRef.current.scrollTop - (currentMidpoint.y - pinchRef.current.midpoint.y)
         }
-        if (nextZoom !== zoom) onZoomChange(nextZoom)
+        pendingPinchZoomRef.current = nextZoom
         return
       }
     }
@@ -460,7 +469,15 @@ export function PatternViewer({
   function handlePointerEnd(event: ReactPointerEvent<HTMLCanvasElement>) {
     if (event.pointerType === 'touch') {
       touchesRef.current.delete(event.pointerId)
-      if (touchesRef.current.size < 2) pinchRef.current = null
+      if (touchesRef.current.size < 2) {
+        const nextZoom = pendingPinchZoomRef.current
+        if (nextZoom !== null && nextZoom !== zoomRef.current) {
+          zoomRef.current = nextZoom
+          onZoomChange(nextZoom)
+        }
+        pendingPinchZoomRef.current = null
+        pinchRef.current = null
+      }
     }
     if (touchesRef.current.size === 0 || event.pointerType !== 'touch') {
       paintingRef.current = false

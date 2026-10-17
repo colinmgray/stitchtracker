@@ -29,8 +29,3 @@ export type PatternData = {
   occurrences: StitchOccurrence[]
   symbols: StitchSymbol[]
 }
-
-export type SymbolAssets = {
-  colors: Map<string, string>
-  fallbackImages: Map<string, string>
-}

@@ -2,12 +2,12 @@ import {
   GlobalWorkerOptions,
   getDocument,
   type PDFDocumentProxy,
+  type PageViewport,
 } from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import type {
   PatternData,
   PatternSource,
-  SymbolAssets,
   StitchOccurrence,
   StitchSymbol,
 } from '../types'
@@ -111,32 +111,8 @@ export async function extractPattern(document: PDFDocumentProxy): Promise<Patter
   return { occurrences, symbols }
 }
 
-export async function buildSymbolAssets(
-  document: PDFDocumentProxy,
-  pattern: PatternData,
-): Promise<SymbolAssets> {
-  const fallbackSymbols = pattern.symbols
-  const fallbackImages = fallbackSymbols.length
-    ? await extractFallbackGlyphs(document, fallbackSymbols)
-    : new Map<string, string>()
-  const colors = await extractSymbolColors(document, pattern)
-  return { colors, fallbackImages }
-}
-
-async function renderPage(document: PDFDocumentProxy, pageNumber: number, scale: number) {
-  const page = await document.getPage(pageNumber)
-  const viewport = page.getViewport({ scale })
-  const canvas = window.document.createElement('canvas')
-  canvas.width = Math.ceil(viewport.width)
-  canvas.height = Math.ceil(viewport.height)
-  const context = canvas.getContext('2d', { alpha: false, willReadFrequently: true })
-  if (!context) throw new Error('Canvas rendering is not available in this browser.')
-  await page.render({ canvas, canvasContext: context, viewport }).promise
-  return { canvas, context, viewport }
-}
-
 function cellRect(
-  viewport: ReturnType<Awaited<ReturnType<PDFDocumentProxy['getPage']>>['getViewport']>,
+  viewport: PageViewport,
   occurrence: StitchOccurrence,
 ) {
   const [originX, baselineY] = viewport.convertToViewportPoint(
@@ -152,12 +128,13 @@ function cellRect(
   }
 }
 
-async function extractFallbackGlyphs(
-  document: PDFDocumentProxy,
+export function extractFallbackGlyphs(
+  canvas: HTMLCanvasElement,
+  viewport: PageViewport,
   symbols: StitchSymbol[],
-): Promise<Map<string, string>> {
-  const { canvas, viewport } = await renderPage(document, 1, 5)
+): Map<string, string> {
   const images = new Map<string, string>()
+  const outputScale = canvas.width / viewport.width
 
   for (const symbol of symbols) {
     const rect = cellRect(viewport, symbol.sample)
@@ -170,10 +147,10 @@ async function extractFallbackGlyphs(
     context.imageSmoothingEnabled = true
     context.drawImage(
       canvas,
-      rect.left + inset,
-      rect.top + inset,
-      rect.size - inset * 2,
-      rect.size - inset * 2,
+      (rect.left + inset) * outputScale,
+      (rect.top + inset) * outputScale,
+      (rect.size - inset * 2) * outputScale,
+      (rect.size - inset * 2) * outputScale,
       4,
       4,
       56,
@@ -203,18 +180,18 @@ async function extractFallbackGlyphs(
     images.set(symbol.key, preview.toDataURL('image/png'))
   }
 
-  canvas.width = 1
-  canvas.height = 1
   return images
 }
 
-async function extractSymbolColors(
-  document: PDFDocumentProxy,
+export function extractSymbolColors(
+  canvas: HTMLCanvasElement,
+  viewport: PageViewport,
   pattern: PatternData,
-): Promise<Map<string, string>> {
-  const pageNumber = Math.min(2, document.numPages)
-  const { canvas, context, viewport } = await renderPage(document, pageNumber, 4)
+): Map<string, string> {
+  const context = canvas.getContext('2d', { alpha: false, willReadFrequently: true })
+  if (!context) return new Map()
   const pagePixels = context.getImageData(0, 0, canvas.width, canvas.height).data
+  const outputScale = canvas.width / viewport.width
   const colors = new Map<string, string>()
   const occurrencesByKey = new Map<string, StitchOccurrence[]>()
   for (const occurrence of pattern.occurrences) {
@@ -242,8 +219,20 @@ async function extractSymbolColors(
     for (let index = 0; index < occurrences.length && samples.length < 480; index += step) {
       const rect = cellRect(viewport, occurrences[index])
       for (const [fractionX, fractionY] of samplePoints) {
-        const x = Math.max(0, Math.min(canvas.width - 1, Math.round(rect.left + rect.size * fractionX)))
-        const y = Math.max(0, Math.min(canvas.height - 1, Math.round(rect.top + rect.size * fractionY)))
+        const x = Math.max(
+          0,
+          Math.min(
+            canvas.width - 1,
+            Math.round((rect.left + rect.size * fractionX) * outputScale),
+          ),
+        )
+        const y = Math.max(
+          0,
+          Math.min(
+            canvas.height - 1,
+            Math.round((rect.top + rect.size * fractionY) * outputScale),
+          ),
+        )
         const offset = (y * canvas.width + x) * 4
         samples.push([
           pagePixels[offset],
@@ -256,8 +245,6 @@ async function extractSymbolColors(
     colors.set(symbol.key, medianColor(samples))
   }
 
-  canvas.width = 1
-  canvas.height = 1
   return colors
 }
 
