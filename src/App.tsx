@@ -5,6 +5,7 @@ import { SymbolPanel } from './components/SymbolPanel'
 import { TransferDialog } from './components/TransferDialog'
 import {
   extractPattern,
+  buildHighResolutionGlyphs,
   extractFallbackGlyphs,
   extractSymbolColors,
   loadBundledPattern,
@@ -20,6 +21,7 @@ const EMPTY_PATTERN: PatternData = { occurrences: [], symbols: [] }
 
 export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const sourceDocumentRef = useRef<PDFDocumentProxy | null>(null)
   const symbolImagesBuiltRef = useRef(false)
   const symbolColorsBuiltRef = useRef(false)
   const [source, setSource] = useState<PatternSource | null>(null)
@@ -35,6 +37,7 @@ export default function App() {
   const [showCompleted, setShowCompleted] = useState(true)
   const [lowPerformance, setLowPerformance] = useState(false)
   const [symbolImages, setSymbolImages] = useState<Map<string, string>>(new Map())
+  const [symbolImageVersion, setSymbolImageVersion] = useState<0 | 1>(0)
   const [symbolColors, setSymbolColors] = useState<Map<string, string>>(new Map())
   const [symbolsInView, setSymbolsInView] = useState<Set<string>>(new Set())
   const [pageNumber, setPageNumber] = useState(1)
@@ -62,6 +65,13 @@ export default function App() {
         Object.entries(saved?.symbolColors ?? {})
           .filter(([key, color]) => validSymbolKeys.has(key) && /^#[0-9a-f]{6}$/i.test(color)),
       )
+      const savedImages = new Map(
+        Object.entries(saved?.symbolImages ?? {})
+          .filter(([key, image]) => (
+            validSymbolKeys.has(key) && image.startsWith('data:image/png;base64,')
+          )),
+      )
+      sourceDocumentRef.current = loaded.document
       setSource(loaded)
       setPattern(extracted)
       setVisibleSymbols(new Set())
@@ -69,9 +79,13 @@ export default function App() {
       setCompletedCells(savedCells)
       setProgressStorageKey(storageKey)
       setSaveState('saved')
-      symbolImagesBuiltRef.current = false
+      const savedImageVersion = saved?.symbolImageVersion === 1 ? 1 : 0
+      symbolImagesBuiltRef.current = (
+        savedImageVersion === 1 && savedImages.size === extracted.symbols.length
+      )
       symbolColorsBuiltRef.current = savedColors.size === extracted.symbols.length
-      setSymbolImages(new Map())
+      setSymbolImages(savedImages)
+      setSymbolImageVersion(savedImageVersion)
       setSymbolColors(savedColors)
       setSymbolsInView(new Set(extracted.symbols.map((symbol) => symbol.key)))
       setPageNumber(1)
@@ -95,13 +109,22 @@ export default function App() {
           version: 1,
           completed: Array.from(completedCells),
           symbolColors: Object.fromEntries(symbolColors),
+          symbolImages: Object.fromEntries(symbolImages),
+          symbolImageVersion: symbolImageVersion || undefined,
           updatedAt: new Date().toISOString(),
         })
         .then(() => setSaveState('saved'))
         .catch(() => setSaveState('error'))
     }, 250)
     return () => window.clearTimeout(timer)
-  }, [completedCells, loadState, progressStorageKey, symbolColors])
+  }, [
+    completedCells,
+    loadState,
+    progressStorageKey,
+    symbolColors,
+    symbolImages,
+    symbolImageVersion,
+  ])
 
   async function handleUpload(file: File | undefined) {
     if (!file) return
@@ -175,7 +198,22 @@ export default function App() {
   ) => {
     if (renderedPageNumber === 1 && !symbolImagesBuiltRef.current) {
       symbolImagesBuiltRef.current = true
-      setSymbolImages(extractFallbackGlyphs(canvas, viewport, pattern.symbols))
+      const fallbackImages = extractFallbackGlyphs(canvas, viewport, pattern.symbols)
+      const sourceDocument = source?.document
+      setSymbolImages(fallbackImages)
+      if (sourceDocument) {
+        window.setTimeout(() => {
+          void buildHighResolutionGlyphs(sourceDocument, pattern.symbols)
+            .then((highResolutionImages) => {
+              if (sourceDocumentRef.current !== sourceDocument) return
+              setSymbolImages(new Map([
+                ...fallbackImages,
+                ...highResolutionImages,
+              ]))
+              setSymbolImageVersion(1)
+            })
+        }, 0)
+      }
     }
 
     const isColorSource = renderedPageNumber === 2 || source?.document.numPages === 1
@@ -403,14 +441,23 @@ export default function App() {
           patternKey={progressStorageKey}
           completedCells={completedCells}
           symbolColors={symbolColors}
+          symbolImages={symbolImages}
+          symbolImageVersion={symbolImageVersion}
           validCellIds={new Set(pattern.occurrences.map((occurrence) => occurrence.id))}
           validSymbolKeys={new Set(pattern.symbols.map((symbol) => symbol.key))}
           totalStitches={pattern.occurrences.length}
-          onImport={(importedCells, importedColors) => {
+          onImport={(importedCells, importedColors, importedImages, importedImageVersion) => {
             setCompletedCells(importedCells)
             if (importedColors.size) {
               setSymbolColors(importedColors)
               symbolColorsBuiltRef.current = importedColors.size === pattern.symbols.length
+            }
+            if (importedImages.size) {
+              setSymbolImages(importedImages)
+              setSymbolImageVersion(importedImageVersion)
+              symbolImagesBuiltRef.current = (
+                importedImageVersion === 1 && importedImages.size === pattern.symbols.length
+              )
             }
           }}
           onClose={() => setTransferOpen(false)}

@@ -15,6 +15,10 @@ import type {
 GlobalWorkerOptions.workerSrc = workerUrl
 
 const BUNDLED_PATTERN_URL = './patterns/schema-bu5062.pdf'
+const GLYPH_RENDER_SCALE = 12
+const GLYPH_TILE_SIZE = 3_072
+const GLYPH_TILE_PADDING = 64
+const GLYPH_PREVIEW_SIZE = 96
 
 type PdfTextItem = {
   str: string
@@ -138,46 +142,130 @@ export function extractFallbackGlyphs(
 
   for (const symbol of symbols) {
     const rect = cellRect(viewport, symbol.sample)
-    const inset = rect.size * 0.12
-    const preview = window.document.createElement('canvas')
-    preview.width = 64
-    preview.height = 64
-    const context = preview.getContext('2d', { willReadFrequently: true })
-    if (!context) continue
-    context.imageSmoothingEnabled = true
-    context.drawImage(
+    const image = createGlyphPreview(
       canvas,
-      (rect.left + inset) * outputScale,
-      (rect.top + inset) * outputScale,
-      (rect.size - inset * 2) * outputScale,
-      (rect.size - inset * 2) * outputScale,
-      4,
-      4,
-      56,
-      56,
+      {
+        left: rect.left * outputScale,
+        top: rect.top * outputScale,
+        size: rect.size * outputScale,
+      },
     )
+    if (image) images.set(symbol.key, image)
+  }
 
-    const pixels = context.getImageData(0, 0, 64, 64)
-    for (let i = 0; i < pixels.data.length; i += 4) {
-      const pixel = i / 4
-      const x = pixel % 64
-      const y = Math.floor(pixel / 64)
-      const red = pixels.data[i]
-      const green = pixels.data[i + 1]
-      const blue = pixels.data[i + 2]
-      const luminance = red * 0.299 + green * 0.587 + blue * 0.114
-      const insideGlyphArea = x >= 9 && x <= 54 && y >= 9 && y <= 54
-      const alpha = insideGlyphArea
-        ? Math.max(0, Math.min(255, (225 - luminance) * 5))
-        : 0
-      pixels.data[i] = 20
-      pixels.data[i + 1] = 39
-      pixels.data[i + 2] = 36
-      pixels.data[i + 3] = alpha
+  return images
+}
+
+function createGlyphPreview(
+  source: HTMLCanvasElement,
+  rect: { left: number; top: number; size: number },
+) {
+  const inset = rect.size * 0.06
+  const preview = window.document.createElement('canvas')
+  preview.width = GLYPH_PREVIEW_SIZE
+  preview.height = GLYPH_PREVIEW_SIZE
+  const context = preview.getContext('2d', { willReadFrequently: true })
+  if (!context) return null
+  const previewInset = 6
+  context.imageSmoothingEnabled = true
+  context.drawImage(
+    source,
+    rect.left + inset,
+    rect.top + inset,
+    rect.size - inset * 2,
+    rect.size - inset * 2,
+    previewInset,
+    previewInset,
+    GLYPH_PREVIEW_SIZE - previewInset * 2,
+    GLYPH_PREVIEW_SIZE - previewInset * 2,
+  )
+
+  const pixels = context.getImageData(0, 0, GLYPH_PREVIEW_SIZE, GLYPH_PREVIEW_SIZE)
+  for (let i = 0; i < pixels.data.length; i += 4) {
+    const pixel = i / 4
+    const x = pixel % GLYPH_PREVIEW_SIZE
+    const y = Math.floor(pixel / GLYPH_PREVIEW_SIZE)
+    const red = pixels.data[i]
+    const green = pixels.data[i + 1]
+    const blue = pixels.data[i + 2]
+    const luminance = red * 0.299 + green * 0.587 + blue * 0.114
+    const insideGlyphArea = (
+      x >= previewInset &&
+      x < GLYPH_PREVIEW_SIZE - previewInset &&
+      y >= previewInset &&
+      y < GLYPH_PREVIEW_SIZE - previewInset
+    )
+    const alpha = insideGlyphArea
+      ? Math.max(0, Math.min(255, (225 - luminance) * 5))
+      : 0
+    pixels.data[i] = 20
+    pixels.data[i + 1] = 39
+    pixels.data[i + 2] = 36
+    pixels.data[i + 3] = alpha
+  }
+  context.clearRect(0, 0, GLYPH_PREVIEW_SIZE, GLYPH_PREVIEW_SIZE)
+  context.putImageData(pixels, 0, 0)
+  return preview.toDataURL('image/png')
+}
+
+export async function buildHighResolutionGlyphs(
+  document: PDFDocumentProxy,
+  symbols: StitchSymbol[],
+): Promise<Map<string, string>> {
+  const page = await document.getPage(1)
+  const viewport = page.getViewport({ scale: GLYPH_RENDER_SCALE })
+  const groups = new Map<string, StitchSymbol[]>()
+
+  for (const symbol of symbols) {
+    const rect = cellRect(viewport, symbol.sample)
+    const tileX = Math.floor((rect.left + rect.size / 2) / GLYPH_TILE_SIZE)
+    const tileY = Math.floor((rect.top + rect.size / 2) / GLYPH_TILE_SIZE)
+    const key = `${tileX}:${tileY}`
+    const group = groups.get(key) ?? []
+    group.push(symbol)
+    groups.set(key, group)
+  }
+
+  const images = new Map<string, string>()
+  for (const [key, group] of groups) {
+    const [tileX, tileY] = key.split(':').map(Number)
+    const left = Math.max(0, tileX * GLYPH_TILE_SIZE - GLYPH_TILE_PADDING)
+    const top = Math.max(0, tileY * GLYPH_TILE_SIZE - GLYPH_TILE_PADDING)
+    const right = Math.min(
+      viewport.width,
+      (tileX + 1) * GLYPH_TILE_SIZE + GLYPH_TILE_PADDING,
+    )
+    const bottom = Math.min(
+      viewport.height,
+      (tileY + 1) * GLYPH_TILE_SIZE + GLYPH_TILE_PADDING,
+    )
+    const canvas = window.document.createElement('canvas')
+    canvas.width = Math.ceil(right - left)
+    canvas.height = Math.ceil(bottom - top)
+    const context = canvas.getContext('2d', { alpha: false })
+    if (!context) continue
+
+    await page.render({
+      canvas,
+      canvasContext: context,
+      viewport,
+      background: '#ffffff',
+      transform: [1, 0, 0, 1, -left, -top],
+    }).promise
+
+    for (const symbol of group) {
+      const rect = cellRect(viewport, symbol.sample)
+      const image = createGlyphPreview(canvas, {
+        left: rect.left - left,
+        top: rect.top - top,
+        size: rect.size,
+      })
+      if (image) images.set(symbol.key, image)
     }
-    context.clearRect(0, 0, 64, 64)
-    context.putImageData(pixels, 0, 0)
-    images.set(symbol.key, preview.toDataURL('image/png'))
+
+    canvas.width = 1
+    canvas.height = 1
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
   }
 
   return images

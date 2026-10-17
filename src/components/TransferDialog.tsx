@@ -5,10 +5,17 @@ type TransferDialogProps = {
   patternKey: string
   completedCells: Set<string>
   symbolColors: Map<string, string>
+  symbolImages: Map<string, string>
+  symbolImageVersion: 0 | 1
   validCellIds: Set<string>
   validSymbolKeys: Set<string>
   totalStitches: number
-  onImport: (completed: Set<string>, symbolColors: Map<string, string>) => void
+  onImport: (
+    completed: Set<string>,
+    symbolColors: Map<string, string>,
+    symbolImages: Map<string, string>,
+    symbolImageVersion: 0 | 1,
+  ) => void
   onClose: () => void
 }
 
@@ -20,6 +27,8 @@ type TransferPayload = {
   totalStitches: number
   completed: string[]
   symbolColors?: Record<string, string>
+  symbolImages?: Record<string, string>
+  symbolImageVersion?: 1
   exportedAt: string
 }
 
@@ -44,7 +53,14 @@ function isTransferPayload(value: unknown): value is TransferPayload {
       payload.symbolColors !== null &&
       !Array.isArray(payload.symbolColors) &&
       Object.values(payload.symbolColors).every((color) => typeof color === 'string')
-    ))
+    )) &&
+    (payload.symbolImages === undefined || (
+      typeof payload.symbolImages === 'object' &&
+      payload.symbolImages !== null &&
+      !Array.isArray(payload.symbolImages) &&
+      Object.values(payload.symbolImages).every((image) => typeof image === 'string')
+    )) &&
+    (payload.symbolImageVersion === undefined || payload.symbolImageVersion === 1)
   )
 }
 
@@ -53,6 +69,8 @@ export function TransferDialog({
   patternKey,
   completedCells,
   symbolColors,
+  symbolImages,
+  symbolImageVersion,
   validCellIds,
   validSymbolKeys,
   totalStitches,
@@ -80,6 +98,8 @@ export function TransferDialog({
       totalStitches,
       completed: Array.from(completedCells),
       symbolColors: Object.fromEntries(symbolColors),
+      symbolImages: Object.fromEntries(symbolImages),
+      symbolImageVersion: symbolImageVersion || undefined,
       exportedAt: new Date().toISOString(),
     }
     return new File([JSON.stringify(payload, null, 2)], `${safeFileName(patternName)}.stitchprogress.json`, {
@@ -140,7 +160,18 @@ export function TransferDialog({
             validSymbolKeys.has(key) && /^#[0-9a-f]{6}$/i.test(color)
           )),
       )
-      onImport(imported, importedColors)
+      const importedImages = new Map(
+        Object.entries(payload.symbolImages ?? {})
+          .filter(([key, image]) => (
+            validSymbolKeys.has(key) && image.startsWith('data:image/png;base64,')
+          )),
+      )
+      onImport(
+        imported,
+        importedColors,
+        importedImages,
+        payload.symbolImageVersion === 1 ? 1 : 0,
+      )
       setMessage(`Imported ${imported.size.toLocaleString()} completed stitches.`)
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : 'Progress could not be imported.')
