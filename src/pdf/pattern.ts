@@ -45,8 +45,22 @@ export async function loadUploadedPattern(file: File): Promise<PatternSource> {
 
 export async function extractPattern(document: PDFDocumentProxy): Promise<PatternData> {
   const page = await document.getPage(1)
-  const text = await page.getTextContent({ disableNormalization: true })
-  const occurrences: StitchOccurrence[] = text.items.flatMap((item) => {
+  const textItems: unknown[] = []
+  const reader = page
+    .streamTextContent({ disableNormalization: true })
+    .getReader()
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      textItems.push(...value.items)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  const occurrences: StitchOccurrence[] = textItems.flatMap((item) => {
     if (!isTextItem(item) || !isStitchGlyph(item)) return []
     const key = `${item.fontName}:${item.str.codePointAt(0)}`
     return [
